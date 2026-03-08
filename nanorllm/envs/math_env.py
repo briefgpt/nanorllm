@@ -55,7 +55,7 @@ class MathEnv(BaseEnv):
         return {'prediction': prediction, 'origin_prediction': origin_prediction, 'termination_reason': termination_reason}
 
     def verifier(self, prediction, task):
-        if  prediction == task['ground_truth']:
+        if  prediction == task['answer']:
             return True
         else:
             return False

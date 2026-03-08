@@ -12,7 +12,7 @@ from nanorllm.agents.math_agent import MathAgent
 from nanorllm.envs.math_env import MathEnv
 from nanorllm.llm.gemini import GeminiLLM
 
-demo_data = {"question": "80 增加 15% 后是多少？", "ground_truth": "92", "task_id": "000"}
+demo_data = {"question": "80 增加 15% 后是多少？", "answer": "92", "task_id": "000"}
 
 
 system_prompt = """You are a careful math problem solver. Think step by step when useful, and end with a clear final answer.

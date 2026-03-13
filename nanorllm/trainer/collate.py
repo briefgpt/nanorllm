@@ -1,46 +1,8 @@
 from typing import Any
-from nanorllm.utils.util import render_prompt_messages, format_training_text
 import torch
 
 
 
-# def tokenize_sample(
-#     sample: dict[str, Any],
-#     tokenizer,
-#     max_length: int,
-# ) -> dict[str, torch.Tensor]:
-#     '''
-#     把一条样本变成单条可训练序列，同时保留prompt和response的分界线，用于构建reponse_mask。
-#     输入sample:
-#     {
-#         "prompt_messages": [...],
-#         "response": "...",
-#         "advantage": 0.5,
-#     }
-#     1. 分别tokenize prompt和response，获取input_ids，
-#     2. 将prompt和response的input_ids 拼接，在序列末尾增加eos_token
-#     3. 使用max_length 截断，确定prompt_ids 的长度
-#     4. 构建attention_mask
-#     5. 构建labels
-#     '''
-#     prompt_text, response_text = format_training_text(sample)
-    
-#     prompt_ids = tokenizer(prompt_text, add_special_tokens=False, return_attention_mask=False)['input_ids']
-#     response_ids = tokenizer(response_text, add_special_tokens=False, return_attention_mask=False)['input_ids']
-#     input_id_list = prompt_ids+ response_ids
-#     if tokenizer.eos_token_id is not None:
-#         input_id_list.append(tokenizer.eos_token_id) # 注意这里手动加了eos token
-#     input_id_list = input_id_list[:max_length]
-#     prompt_ids_len = min(len(prompt_ids), len(input_id_list))
-
-#     input_ids = torch.tensor(input_id_list, dtype=torch.long)
-#     attention_mask = torch.ones_like(input_ids)
-#     labels = input_ids.clone()
-#     rollout_logprobs = sample['rollout_logprobs']
-#     print(sample['advantage'])
-#     return {'input_ids': input_ids, 'prompt_input_ids_len': prompt_ids_len, 'labels': labels, 'attention_mask': attention_mask, 
-#             'advantage': torch.tensor(sample['advantage'], dtype=torch.float32),
-#             'rollout_logprobs': rollout_logprobs}
 
 
 def build_response_mask(
@@ -63,7 +25,7 @@ def build_response_mask(
 
 
 def collate_train_batch(
-    samples: list[dict[str, Any]],
+    samples: list[Any],
     tokenizer,
     args
 ) -> dict[str, torch.Tensor]:
@@ -88,10 +50,10 @@ def collate_train_batch(
     batch_advantages = []
     batch_rollout_logprobs = []
     
-    for sample in samples:
-        prompt_ids = sample["prompt_ids"]
-        response_ids = sample["response_ids"]
-        rollout_logprobs = sample["rollout_logprobs"]
+    for step in samples:
+        prompt_ids = step.prompt_ids
+        response_ids = step.response_ids
+        rollout_logprobs = step.rollout_logprobs
 
         if prompt_ids.dim() == 2:
             prompt_ids = prompt_ids.squeeze(0)
@@ -124,7 +86,7 @@ def collate_train_batch(
         batch_input_ids.append(input_ids)
         batch_attention_mask.append(attention_mask)
         batch_labels.append(labels)
-        batch_advantages.append(torch.tensor(sample["advantage"], dtype=torch.float32))
+        batch_advantages.append(torch.tensor(step.advantage, dtype=torch.float32))
         batch_rollout_logprobs.append(old_logprobs)
         batch_response_mask.append(response_mask)
 

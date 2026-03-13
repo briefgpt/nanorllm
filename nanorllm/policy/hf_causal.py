@@ -36,42 +36,77 @@ class HFCausalPolicy(BasePolicy):
         attention_mask: torch.Tensor | None = None,
     ):
         return self.model(input_ids=input_ids, attention_mask=attention_mask)
-    
 
-    def generate(self, prompt_text: str, max_new_tokens: int, temperature: float=1.0, top_p: float | None=None):
-        # Todo kvcache enhance
+    def _sample_token(self, logits: torch.Tensor, temperature: float):
+        scaled_logits = logits / temperature
+        probs = torch.nn.functional.softmax(scaled_logits, dim=-1)
+        token_id = torch.multinomial(probs, num_samples=1)
+        log_probs = torch.nn.functional.log_softmax(scaled_logits, dim=-1)
+        token_log_prob = torch.gather(log_probs, index=token_id, dim=-1)
+        return token_id, token_log_prob
+
+    def generate(self, prompt_text: str, args):
         response_ids = []
         rollout_logprobs = []
 
-        tokenized_prompt = self._tokenizer(prompt_text,add_special_tokens=False, return_tensors="pt")
-        input_ids = tokenized_prompt['input_ids']
-        attention_mask = tokenized_prompt['attention_mask']
-        prompt_ids = tokenized_prompt['input_ids']
+        tokenized_prompt = self._tokenizer(
+            prompt_text,
+            add_special_tokens=False,
+            return_tensors="pt",
+        )
+        prompt_ids = tokenized_prompt["input_ids"]
+        input_ids = prompt_ids.to(self.device)
+        attention_mask = tokenized_prompt["attention_mask"].to(self.device)
 
         self.model.eval()
         with torch.no_grad():
-            for i in range(max_new_tokens):
-                logits = self.model(input_ids=input_ids, attention_mask=attention_mask).logits[:,-1,:]
-                token_logit = torch.nn.functional.softmax(logits/temperature, dim=-1) # 这里是softmax
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=True,
+            )
+            logits = outputs.logits[:, -1, :]
+            past_key_values = outputs.past_key_values # kv cache
 
-                token_id = torch.multinomial(token_logit, num_samples=1)
-
-                token_log_logits = torch.nn.functional.log_softmax(logits/temperature, dim=-1)
-                token_log_prob = torch.gather(token_log_logits, index=token_id, dim=-1)
-
+            for _ in range(args.max_new_tokens):
+                token_id, token_log_prob = self._sample_token(logits, args.temperature)
                 rollout_logprobs.append(token_log_prob)
-
                 response_ids.append(token_id)
+
                 if token_id.item() == self._tokenizer.eos_token_id:
                     break
 
-                input_ids = torch.concat([input_ids, token_id] , dim=-1)
-                attention_mask = torch.concat([attention_mask, torch.ones_like(token_id)] , dim=-1)
+                attention_mask = torch.concat(
+                    [attention_mask, torch.ones_like(token_id)],
+                    dim=-1,
+                )
+                outputs = self.model(
+                    input_ids=token_id,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+                logits = outputs.logits[:, -1, :]
+                past_key_values = outputs.past_key_values
 
-        rollout_logprobs = torch.stack(rollout_logprobs, dim=-1).view(-1)
-        response_ids = torch.stack(response_ids, dim=-1).view(-1)
+        if response_ids:
+            rollout_logprobs = torch.stack(rollout_logprobs, dim=-1).view(-1)
+            response_ids = torch.stack(response_ids, dim=-1).view(-1)
+        else:
+            rollout_logprobs = torch.empty(0, device=self.device)
+            response_ids = torch.empty(0, dtype=torch.long, device=self.device)
+
+        response_ids = response_ids.detach().cpu()
+        rollout_logprobs = rollout_logprobs.detach().cpu()
+        prompt_ids = prompt_ids.view(-1).detach().cpu()
+
         text = self._tokenizer.decode(response_ids)
-        return {'text': text, 'response_ids': response_ids, 'rollout_logprobs': rollout_logprobs, 'prompt_ids': prompt_ids}
+        return {
+            "text": text,
+            "response_ids": response_ids,
+            "rollout_logprobs": rollout_logprobs,
+            "prompt_ids": prompt_ids,
+        }
 
 
 
@@ -87,4 +122,3 @@ Follow these rules strictly:
 
 <USER>
 17 + 28 = ?''', 10, 0.5)
-

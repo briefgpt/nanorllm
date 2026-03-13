@@ -1,5 +1,5 @@
-from nanorllm.utils.util import render_prompt_messages
-
+from nanorllm.utils.util import render_prompt_for_completion
+from nanorllm.core.trajectory import StepSample, RolloutResult
 
 class RolloutEngine:
     def run_episode(self, agent, env, llm, task, args):
@@ -14,15 +14,16 @@ class RolloutEngine:
         reward = 0.0
         done = False
         agent.update_from_env(observation, reward, done, info)
-
+        episode_step_samples = []
         for i in range(args.max_steps):
-            prompt_text = render_prompt_messages(agent.messages)
-            model_output = llm.generate(prompt_text, args.max_new_tokens)
+            prompt_text = render_prompt_for_completion(agent.messages)
+            model_output = llm.generate(prompt_text, args)
+            step_sample = StepSample(prompt_ids=model_output['prompt_ids'], response_ids=model_output['response_ids'], rollout_logprobs=model_output['rollout_logprobs'])
+            episode_step_samples.append(step_sample)
             action = agent.update_from_model(model_output['text'])
             observation, reward, done, info = env.step(action)
-            agent.trajectory.steps[-1].prompt_ids = model_output['prompt_ids']
-            agent.trajectory.steps[-1].response_ids = model_output['response_ids']
-            agent.trajectory.steps[-1].rollout_logprobs = model_output['rollout_logprobs']
+            
+
 
             agent.update_from_env(observation, reward, done, info)
             if done:
@@ -31,4 +32,4 @@ class RolloutEngine:
         if not agent.trajectory.terminated:
             agent.trajectory.termination_reason = 'max step'
             agent.trajectory.terminated = True
-        return agent.trajectory
+        return RolloutResult(trajectory=agent.trajectory, episode_step_samples=episode_step_samples)

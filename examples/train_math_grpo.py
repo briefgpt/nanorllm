@@ -61,7 +61,7 @@ def rollout_fn(task):
 tasks = get_simple_math_tasks()[:2]
 
 
-metric = run_train_epoch(
+result = run_train_epoch(
     tasks,
     rollout_fn,
     policy,
@@ -69,3 +69,5 @@ metric = run_train_epoch(
     optimizer,
     args
 )
+print(result['batch'])
+print(result['trajectories'])

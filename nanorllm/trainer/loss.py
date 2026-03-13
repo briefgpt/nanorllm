@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 
-def compute_token_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+def compute_token_logprobs(logits: torch.Tensor, labels: torch.Tensor, args) -> torch.Tensor:
     '''
     输入logits 返回labels对应的token log_probs
     1. 因为logits的物理含义是下一个token的logits分布，所以logits直接对应真正关注的labels，但是eos 位置不需要保留了（不关心）
@@ -10,7 +10,7 @@ def compute_token_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.
     3. 取log_softmax, 一般还需要先除以temperature
     4. 通过gather 获取shifted_labels 对应的结果，最终返回[B, T]
     '''
-    shifted_logits = logits[:, :-1, :]
+    shifted_logits = logits[:, :-1, :] / args.temperature
     shifted_labels = labels[:, 1:]
     log_probs = F.log_softmax(shifted_logits, dim=-1) # 注意这里是log_softmax
     token_logprobs = torch.gather(log_probs, dim=-1, index=shifted_labels.unsqueeze(-1)).squeeze(-1)
@@ -21,10 +21,7 @@ def compute_token_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.
 
 
 def compute_policy_loss(logits: torch.Tensor, batch: list, args) -> torch.Tensor:
-    '''
-    loss = -(advantages * sequence_logprobs)
-    '''
-    token_probs = compute_token_logprobs(logits, batch['labels'])
+    token_probs = compute_token_logprobs(logits, batch['labels'], args)
     old_logprobs = batch['old_logprobs']
     advantages = batch['advantages'].unsqueeze(1)
 

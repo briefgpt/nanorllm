@@ -13,6 +13,10 @@ class Step:
     done: bool = False # 真正结束的是执行完这一轮action之后，所以除了Trajectory的terminated外还需要有step-level 的结束标志
     info: dict[str, Any] = field(default_factory=dict) # 能兼容更多env metadata info，方便调试
 
+    prompt_ids: list[Any] | None = None
+    response_ids: list[Any] | None = None
+    rollout_logprobs: list[Any] | None = None
+    advantage: float | None = None
 
 
 # rollout/trainer 的交换对象

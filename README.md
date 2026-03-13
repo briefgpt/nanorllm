@@ -17,11 +17,11 @@
 - 同题多采样后的 `group_by_task_id`
 - 基于 `final_reward` 的组内 advantage
 - 将 trajectory 展开成 step-level train samples
-- 一个最小 `trainer.run_epoch(...)` dry-run
+- `sample -> tokenize -> response_mask -> logprob -> loss -> backward -> optimizer step`
+- 一个最小 `trainer.run_train_epoch(...)` 训练入口
 
 当前还没有做的部分：
 
-- 真正的 policy gradient / 反传更新
 - old policy / ratio / clip
 - critic
 - async rollout
@@ -102,8 +102,8 @@ nanorllm/
 `Trainer`
 
 - 负责批量 rollout
-- 调用 `group_by_task_id -> compute_advantage -> build_train_samples`
-- 当前只做 dry-run，不做参数更新
+- 调用 `group_by_task_id -> compute_advantage -> expand_step_samples`
+- 负责把 sample 组装成 batch，并执行一个最小 `optimizer.step()`
 
 ## 任务格式
 
@@ -138,7 +138,7 @@ nanorllm/
 .venv/bin/python examples/run_math_episode.py
 ```
 
-最小 trainer dry-run：
+最小 trainer train-step：
 
 ```bash
 .venv/bin/python examples/train_math_grpo.py
@@ -148,20 +148,20 @@ nanorllm/
 
 ## Trainer 数据流
 
-当前 `trainer.run_epoch(...)` 的最小流程是：
+当前 `trainer.run_epoch(...)` 的最小 rollout 流程是：
 
 ```python
 trajectories = [rollout_fn(task) ...]
 grouped = group_by_task_id(trajectories)
 grouped_advantages = compute_advantage(grouped)
-samples = build_train_samples(grouped_advantages)
+samples = expand_step_samples(grouped_advantages)
 ```
 
 其中：
 
 - `group_by_task_id` 输入 `list[Trajectory]`
 - `compute_advantage` 输入 `dict[str, list[Trajectory]]`
-- `build_train_samples` 输入 `dict[str, list[tuple[Trajectory, float]]]`
+- `expand_step_samples` 输入 `dict[str, list[tuple[Trajectory, float]]]`
 
 每个 train sample 当前最小结构为：
 
@@ -176,6 +176,21 @@ samples = build_train_samples(grouped_advantages)
 
 这里的 `response` 指的是某个 step 的 `model_response`，不是整条 trajectory 的拼接，也不是单独抽取的 final answer。
 
+当前 `trainer.run_train_epoch(...)` 的最小训练流程是：
+
+```python
+trajectories = collect_rollouts(tasks, num_samples_per_task, rollout_fn)
+samples = build_step_samples_from_trajectories(trajectories)
+batch = build_train_batch(samples, tokenizer=tokenizer, max_length=max_length)
+outputs = policy.forward(batch["input_ids"], batch["attention_mask"])
+loss, sequence_logprobs = compute_policy_loss(
+    outputs.logits,
+    batch["labels"],
+    batch["response_mask"],
+    batch["advantages"],
+)
+```
+
 ## 当前边界
 
 v0 只做这些：
@@ -186,7 +201,7 @@ v0 只做这些：
 - terminal reward
 - 2-5 轮内结束
 - trajectory-level GRPO-lite
-- trainer dry-run
+- 最小训练闭环和单步参数更新
 
 v0 明确不做这些：
 
@@ -199,78 +214,35 @@ v0 明确不做这些：
 - stepwise advantage
 - async rollout
 
-## 下一阶段：真实训练版
+## 当前训练闭环
 
-下一阶段的目标不是继续扩 rollout，而是把当前的 `train samples` 真正接到一个可训练的本地 policy 上。
-
-新的最小闭环应变成：
+当前已经打通的最小闭环是：
 
 题目 -> rollout -> grouped advantage -> train samples -> tokenize -> response logprob -> policy loss -> optimizer step
 
-### 推荐新增文件
+当前训练侧的最小职责分工：
 
 `nanorllm/policy/base.py`
 
 - 定义最小训练 policy 接口
-- 只服务训练，不替代当前的 Gemini rollout backend
-
-建议函数：
-
-- `build_policy(model_name: str, device: str) -> BasePolicy`
-- `generate_text(...)` 可以先不做，训练阶段不必复用 rollout 生成
 
 `nanorllm/policy/hf_causal.py`
 
-- 用 `transformers` 加载一个可训练的 causal LM 和 tokenizer
-- 提供前向计算所需的最小包装
-
-建议函数：
-
-- `load_tokenizer(model_name: str)`
-- `load_model(model_name: str, device: str)`
-- `forward(input_ids, attention_mask) -> logits`
+- 用 `transformers` 加载可训练的 causal LM 和 tokenizer
 
 `nanorllm/trainer/collate.py`
 
-- 负责把 `build_train_samples(...)` 产出的 sample 变成模型输入
-- 这一步要明确“哪些 token 属于 response，需要被优化”
-
-建议函数：
-
-- `render_prompt_messages(prompt_messages: list[dict]) -> str`
-- `format_training_text(sample: dict) -> dict[str, str]`
-- `tokenize_sample(sample: dict, tokenizer, max_length: int) -> dict[str, torch.Tensor]`
-- `build_response_mask(input_ids, prompt_input_ids_len: int) -> torch.Tensor`
-- `collate_train_batch(samples: list[dict], tokenizer, max_length: int) -> dict[str, torch.Tensor]`
+- 把 `expand_step_samples(...)` 产出的 sample 变成模型输入
+- 明确哪些 token 属于 response，需要参与 loss
 
 `nanorllm/trainer/loss.py`
 
-- 负责把模型输出和 advantage 组装成最小 policy loss
-- v1 不碰 old policy / ratio / clip，先做 advantage-weighted logprob
-
-建议函数：
-
-- `compute_token_logprobs(logits, labels) -> torch.Tensor`
-- `masked_sequence_logprobs(token_logprobs, response_mask) -> torch.Tensor`
-- `compute_policy_loss(sequence_logprobs, advantages) -> torch.Tensor`
-- `summarize_batch_metrics(sequence_logprobs, advantages, loss) -> dict[str, float]`
+- 从 `logits` 和 `labels` 提取 response token 的 logprob
+- 结合 advantage 计算最小 policy loss
 
 `nanorllm/trainer/trainer.py`
 
-- 在当前 `run_epoch(...)` 基础上，继续补训练侧 orchestration
-- 区分 `collect_rollouts`、`build_train_batch`、`train_step`
-
-建议函数：
-
-- `collect_rollouts(tasks, num_samples_per_task, rollout_fn) -> list[Trajectory]`
-- `build_training_samples(trajectories) -> list[dict]`
-- `train_step(model, optimizer, batch) -> dict[str, float]`
-- `run_train_epoch(tasks, num_samples_per_task, rollout_fn, model, tokenizer, optimizer) -> dict`
-
-`examples/train_math_grpo.py`
-
-- 作为真实训练版入口
-- 先打印 batch 统计，再执行一个最小 `optimizer.step()`
+- 组织 rollout、sample 构造、batch 构造、前向、反传和参数更新
 
 ### 每个函数要解决的问题
 
@@ -300,13 +272,15 @@ v0 明确不做这些：
 
 `compute_policy_loss(...)`
 
-- 最小版本直接做：
+- 当前输入是 `logits`、`labels`、`response_mask`、`advantages`
+- 内部先计算 token-level logprob，再聚合成 sequence-level logprob
+- 最小版本核心仍然是：
 
 ```python
 loss = -(advantages * sequence_logprobs).mean()
 ```
 
-- 先不要加 ratio、clip、KL
+- 返回 `(loss, sequence_logprobs)`
 
 `train_step(...)`
 
@@ -316,27 +290,16 @@ loss = -(advantages * sequence_logprobs).mean()
 - optimizer step
 - 返回一组简单标量，例如 `loss`、`avg_advantage`、`avg_response_logprob`
 
-### 建议实现顺序
-
-1. `render_prompt_messages`
-2. `tokenize_sample`
-3. `build_response_mask`
-4. `compute_token_logprobs`
-5. `masked_sequence_logprobs`
-6. `compute_policy_loss`
-7. `train_step`
-8. `run_train_epoch`
-
 ### 当前阶段的边界
 
-下一阶段只做这些：
+当前只做这些：
 
 - 本地可训练 causal LM
 - sample 到 loss 的最小链路
-- 一个 batch 的前向和反传
+- 一个 batch 的前向、反传和参数更新
 - 一个 epoch 的最小训练入口
 
-下一阶段先不做这些：
+当前先不做这些：
 
 - old policy
 - ratio / clip
@@ -355,11 +318,85 @@ loss = -(advantages * sequence_logprobs).mean()
 - mixed precision 优化
 - gradient accumulation
 
+## 未来一周实现计划
+
+未来一周按下面的优先级推进：
+
+1. 先把当前 `GRPO-lite` 训练闭环补到更稳定的 PPO/GRPO 形态。
+2. 再把 `trajectory-level final reward` 复制式 credit assignment，升级成 step-level credit assignment。
+3. 同时补最小 eval 和日志，确保训练结果可判断。
+4. 最后补一个更像 agent 的 toy 环境，而不只是多轮文字自修正。
+
+### P0: 稳定训练闭环
+
+本周最先完成这些：
+
+- 保存 rollout 时的 `old_logprob`
+- 在 loss 中加入 `ratio`
+- 增加最小 `clip` 版本
+- 增加 reference policy 或最小 KL 约束
+- 增加 reward / advantage 的基本归一化
+- 记录 `loss`、`avg_reward`、`avg_advantage`、`avg_response_logprob`、`approx_kl`
+
+目标：
+
+- 当前训练不再只是 `loss = -(advantage * logprob).mean()`
+- 训练指标开始能反映 policy 是否偏移过快
+
+### P1: credit assignment 升级
+
+在稳定闭环后，优先做这些：
+
+- 明确区分 `step reward`、`final reward`、`advantage`
+- 不再把同一个 trajectory advantage 原样复制给每个 step
+- 先实现一个最小 step-level credit assignment 版本
+- 如果 step reward 还不够稳定，先做一个可解释的 heuristic 分配版本
+
+目标：
+
+- 让每个 step 的更新更接近它对最终结果的真实贡献
+- 为后续 agentic RL 的长时程决策打基础
+
+### P2: eval 和日志
+
+本周至少补这些可观测性：
+
+- 固定 train / eval task split
+- 每次训练后跑一小组固定 eval tasks
+- 记录 success rate、avg reward、trajectory length、response length
+- 记录 step 数分布、终止原因、advantage 分布
+
+目标：
+
+- 能区分“训练真的提升了”还是“reward hack / sampling 波动”
+
+### P3: 更像 agent 的 toy 环境
+
+如果前面两项推进顺利，本周后半段开始补：
+
+- 状态会变化的环境反馈
+- 更明确的 `observation -> action -> feedback` 边界
+- 非法动作或无效动作惩罚
+- 更清楚的终止条件和 `termination_reason`
+
+目标：
+
+- 让当前 demo 从 `multi-turn math self-refine` 更接近真正的 `agent-env loop`
+
+### 本周完成标志
+
+这一周结束时，对应的 v0.1 目标是：
+
+- 有一个带 `old_logprob + ratio/clip + KL` 的最小训练版本
+- 有一个 step-level credit assignment 的最小实现
+- 有一组固定 eval 指标可持续追踪
+- 有一个比当前 math demo 更接近 agent 行为的 toy 环境原型
+
 ## 备注
 
 当前更看重 demo 能跑通、数据流清楚、对象职责明确。
 
-测试后续再补；现阶段优先保证：
+当前已经补了最小单测，优先锁这些不变量：
 
 - 单题 episode 行为符合预期
 - batch rollout 能形成同题分组

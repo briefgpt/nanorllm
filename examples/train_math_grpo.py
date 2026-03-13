@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 import os
 import torch
+from dataclasses import dataclass
 
 # Allow running `python3 examples/run_math_episode.py` from repo root.
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -10,7 +11,6 @@ if str(REPO_ROOT) not in sys.path:
 from nanorllm.rollout.engine import RolloutEngine
 from nanorllm.agents.math_agent import MathAgent
 from nanorllm.envs.math_env import MathEnv
-from nanorllm.llm.gemini import GeminiLLM
 from nanorllm.datasets.simple_math import get_simple_math_tasks
 from nanorllm.trainer.trainer import run_train_epoch
 from nanorllm.policy.hf_causal import HFCausalPolicy
@@ -30,34 +30,42 @@ Follow these rules strictly:
 3) Never output multiple boxed answers.
 """
 
+
+@dataclass
+class TrainArgs:
+    clip_eps: float=0.2
+    use_kl: bool=False
+    kl_coef: float=0.001
+
+    temperature: float = 1.0
+    max_new_tokens: int=12
+    max_steps: int = 5
+    num_samples_per_task: int = 2
+    max_length: int = 1024
+
+    lr: float = 1e-5
+
+args = TrainArgs()
 engine = RolloutEngine()
 agent = MathAgent(system_prompt=system_prompt)
 env = MathEnv()
-llm = GeminiLLM(timeout=200)
 policy = HFCausalPolicy(model_name='openai-community/gpt2', device='cpu')
 tokenizer = policy._tokenizer
-optimizer = torch.optim.AdamW(policy.parameters(), lr=1e-5)
+optimizer = torch.optim.AdamW(policy.parameters(), lr=args.lr)
 
 def rollout_fn(task):
-    return engine.run_episode(agent, env, llm, task, max_steps=10)
+    return engine.run_episode(agent, env, policy, task, args)
 
 
 
 tasks = get_simple_math_tasks()[:2]
 
 
-# result = run_epoch(tasks, 2, rollout_fn)
-# print(len(result["trajectories"]))
-# print({k: len(v) for k, v in result["grouped"].items()})
-# print(result["samples"][0])
-# print(result["samples"][1])
-
 metric = run_train_epoch(
     tasks,
-    2,
     rollout_fn,
     policy,
     tokenizer,
     optimizer,
-    max_length=2048
+    args
 )

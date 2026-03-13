@@ -3,37 +3,49 @@ import torch.nn.functional as F
 
 
 def compute_token_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    '''
+    输入logits 返回labels对应的token log_probs
+    1. 因为logits的物理含义是下一个token的logits分布，所以logits直接对应真正关注的labels，但是eos 位置不需要保留了（不关心）
+    2. labels 需要向后shift 一位，因为labels和input_ids 一样，labels shift一位后是logits对应要解码的token
+    3. 取log_softmax, 一般还需要先除以temperature
+    4. 通过gather 获取shifted_labels 对应的结果，最终返回[B, T]
+    '''
     shifted_logits = logits[:, :-1, :]
     shifted_labels = labels[:, 1:]
     log_probs = F.log_softmax(shifted_logits, dim=-1) # 注意这里是log_softmax
-    token_probs = torch.gather(log_probs, dim=-1, index=shifted_labels.unsqueeze(-1)).squeeze(-1)
-    return token_probs
-
-
-def masked_sequence_logprobs(
-    token_logprobs: torch.Tensor,
-    response_mask: torch.Tensor,
-) -> torch.Tensor:
-    mask = response_mask[:, 1:].to(token_logprobs.dtype) # 注意这里也需要shift，否则和token_logprobs 长度对不上，和labels的切片对齐
-    masked_sequence_logprobs = token_logprobs* mask
-    return masked_sequence_logprobs.sum(-1)/ mask.sum(-1)
+    token_logprobs = torch.gather(log_probs, dim=-1, index=shifted_labels.unsqueeze(-1)).squeeze(-1)
+    return  token_logprobs
 
 
 
-def compute_policy_loss(
-    sequence_logprobs: torch.Tensor,
-    advantages: torch.Tensor,
-) -> torch.Tensor:
-    return -(advantages * sequence_logprobs).mean()
+
+
+def compute_policy_loss(logits: torch.Tensor, batch: list, args) -> torch.Tensor:
+    '''
+    loss = -(advantages * sequence_logprobs)
+    '''
+    token_probs = compute_token_logprobs(logits, batch['labels'])
+    old_logprobs = batch['old_logprobs']
+    advantages = batch['advantages'].unsqueeze(1)
+
+    ratio = torch.exp(token_probs-old_logprobs)
+    clipped_ratio = torch.clamp(ratio, 1 - args.clip_eps, 1 + args.clip_eps)
+
+    policy_loss = -torch.min(ratio* advantages, clipped_ratio* advantages)  * batch['loss_mask']
+    loss = policy_loss.sum() / batch['loss_mask'].sum()
+
+    if args.use_kl:
+        kl_penalty = args.kl_coef * (token_probs-old_logprobs) * batch['loss_mask']
+        kl_penalty_loss = kl_penalty.sum() / batch['loss_mask'].sum()
+        loss = loss  + kl_penalty_loss
+    return loss
 
 
 def summarize_batch_metrics(
-    sequence_logprobs: torch.Tensor,
     advantages: torch.Tensor,
     loss: torch.Tensor,
 ) -> dict[str, float]:
     return {
         "loss": float(loss.detach().item()),
         "avg_advantage": float(advantages.detach().mean().item()),
-        "avg_response_logprob": float(sequence_logprobs.detach().mean().item()),
     }
